@@ -2,6 +2,8 @@
 #define VEHICLE_H
 
 #include <iostream>
+#include <sstream>
+#include <fstream>
 #include <cstdlib>
 #include <cmath>
 #include <limits>
@@ -12,6 +14,7 @@
 #include <std_msgs/Empty.h>
 #include <std_msgs/String.h>
 #include <std_msgs/Bool.h>
+#include <std_srvs/Trigger.h>
 #include <geographic_msgs/GeoPoint.h>
 #include <geographic_msgs/GeoPoseStamped.h>
 #include <geometry_msgs/Twist.h>
@@ -92,6 +95,20 @@ public:
 	static AdaptivePotentialField* getInstance(){
 		if(instance_ == nullptr)
 			instance_ = new AdaptivePotentialField();
+		return instance_;
+	}
+	virtual tf2::Vector3 generate(LocalPlanner &);
+};
+
+class CTCA : public Plans
+{
+private:
+	static CTCA* instance_;
+	CTCA(){};
+public:
+	static CTCA* getInstance(){
+		if(instance_ == nullptr)
+			instance_ = new CTCA();
 		return instance_;
 	}
 	virtual tf2::Vector3 generate(LocalPlanner &);
@@ -248,6 +265,15 @@ class Vehicle
 
 	std::pair<int, int> scen_pose_;
 	static double max_speed_;
+	bool isOnMission_;
+	bool isInCollision_;
+
+	ros::Time mission_start_;
+	ros::Time mission_end_;
+	ros::Time collision_start_;
+	geometry_msgs::PoseStamped pre_pose_;
+	std::vector<ros::Duration> collsions_;
+	std::vector<double> moving_dist_;
 
 	/*fermware version=> diagnositic_msgs/DiagnosticStatus*/
 
@@ -287,7 +313,7 @@ class Vehicle
 	bool takeoff(const double &);
 	bool land();
 	void setGeoTarget(const sensor_msgs::NavSatFix &target){gp_controller_.setTarget(target);};
-	void setLocalTarget(const geometry_msgs::PoseStamped &target){lp_controller_.setTarget(target);};
+	void setLocalTarget(const geometry_msgs::PoseStamped &);
 	void goTo();
 
 	void setScenPose(const std::pair<int, int> &scen_pose){scen_pose_ = scen_pose;};
@@ -338,6 +364,8 @@ class Vehicle
 		r_vel_pub_.publish(msg);
 	};
 	void setNearestObs(const tf2::Vector3 &nearest_obs){local_planner_.setNearestObs(nearest_obs);};
+	ros::Duration getMissionDuration(){return mission_end_ - mission_start_;};
+	std::string printMovingDist();
 
 	bool isPublish() const {return lp_controller_.isPublished();};
 };
@@ -360,6 +388,7 @@ class SwarmVehicle
 	ros::ServiceServer multi_setpoint_local_server_;
 	ros::ServiceServer multi_setpoint_global_server_;
 	ros::ServiceServer goto_vehicle_server_;
+	ros::ServiceServer print_summary_server_;
 
 	tf2::Vector3 swarm_target_local_;
 
@@ -393,7 +422,9 @@ class SwarmVehicle
 	bool multiSetpointGlobal(swarm_ctrl_pkg::srvMultiSetpointGlobal::Request &req,
 							 swarm_ctrl_pkg::srvMultiSetpointGlobal::Response &res);
 	bool gotoVehicle(swarm_ctrl_pkg::srvGoToVehicle::Request &req,
-					 swarm_ctrl_pkg::srvGoToVehicle::Response &res);
+					 swarm_ctrl_pkg::srvGoToVehicle::Response &res);					 
+	bool printSummary(std_srvs::Trigger::Request &req,
+				      std_srvs::Trigger::Response &res);
 
 	static tf2::Vector3 convertGeoToENU(const sensor_msgs::NavSatFix &,
 										const sensor_msgs::NavSatFix &);

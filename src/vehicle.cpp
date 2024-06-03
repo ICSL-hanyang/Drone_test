@@ -3,9 +3,18 @@
 #include <scenario.h>
 #include <scenario2.h>
 
+double operator-(const geometry_msgs::PoseStamped& lhs, const geometry_msgs::PoseStamped& rhs) {
+    double dx = lhs.pose.position.x - rhs.pose.position.x;
+    double dy = lhs.pose.position.y - rhs.pose.position.y;
+    double dz = lhs.pose.position.z - rhs.pose.position.z;
+
+    return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
 AttractiveOnly* AttractiveOnly::instance_ = nullptr;
 PotentialField* PotentialField::instance_ = nullptr;
 AdaptivePotentialField* AdaptivePotentialField::instance_ = nullptr;
+CTCA* CTCA::instance_ = nullptr;
 
 tf2::Vector3 AttractiveOnly::generate(LocalPlanner &lp){
 	tf2::Vector3 local_plan = lp.getAttOut();
@@ -20,8 +29,16 @@ tf2::Vector3 PotentialField::generate(LocalPlanner &lp){
 
 tf2::Vector3 AdaptivePotentialField::generate(LocalPlanner &lp){
 	tf2::Vector3 att = lp.getAttOut();
-	// tf2::Vector3 rep = lp.getRepOut() + lp.getRepVelOut();
-	tf2::Vector3 rep = lp.getRepOut();
+	tf2::Vector3 rep = lp.getRepOut() + lp.getRepVelOut();
+	tf2::Vector3 local_plan = att + rep;
+	
+	return local_plan;
+}
+
+tf2::Vector3 CTCA::generate(LocalPlanner &lp){
+	tf2::Vector3 att = lp.getAttOut();
+	tf2::Vector3 rep = lp.getRepOut() + lp.getRepVelOut();
+	// tf2::Vector3 rep = lp.getRepOut();
 	tf2::Vector3 local_plan;
 	tf2::Vector3 nearest_obs = lp.getNearestObs();
 	double t_safety = lp.getTSafety();
@@ -247,6 +264,8 @@ Vehicle::Vehicle(ros::NodeHandle &nh_mul, ros::NodeHandle &nh_global)
 	  nh_mul_(nh_mul),
 	  nh_global_(nh_global),
 	  scen_pose_(std::pair<int, int>(0, 0)),
+	  isOnMission_(false),
+	  isInCollision_(false),
 	  gp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_),
 	  lp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_)
 {
@@ -259,6 +278,8 @@ Vehicle::Vehicle(ros::NodeHandle &nh_mul, ros::NodeHandle &nh_global, const Vehi
 	  nh_mul_(nh_mul),
 	  nh_global_(nh_global),
 	  scen_pose_(std::pair<int, int>(0, 0)),
+	  isOnMission_(false),
+	  isInCollision_(false),
 	  gp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_),
 	  lp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_)
 {
@@ -271,6 +292,8 @@ Vehicle::Vehicle(const Vehicle &rhs)
 	  nh_mul_(rhs.nh_mul_),
 	  nh_global_(rhs.nh_global_),
 	  scen_pose_(std::pair<int, int>(0, 0)),
+	  isOnMission_(false),
+	  isInCollision_(false),
 	  gp_controller_(nh_, rhs.nh_global_, vehicle_info_.vehicle_name_),
 	  lp_controller_(nh_, rhs.nh_global_, vehicle_info_.vehicle_name_)
 {
@@ -482,6 +505,13 @@ bool Vehicle::land()
 	return msg.response.success;
 }
 
+void Vehicle::setLocalTarget(const geometry_msgs::PoseStamped &target)
+{
+	mission_start_ = ros::Time::now();
+	isOnMission_ = true;
+	lp_controller_.setTarget(target);
+}
+
 void Vehicle::goTo(){
 	bool use_velocity_controller;
 	double kp_att, kp_rep, ki_rep, kd_rep, kp_rep_vel, t_safety;
@@ -504,17 +534,60 @@ void Vehicle::goTo(){
 	limit(local_plan, max_speed_);
 	geometry_msgs::PoseStamped local_path;
 	geometry_msgs::PoseStamped cur_pose = lp_controller_.getPose();
+	geometry_msgs::PoseStamped target = lp_controller_.getTarget();
+	tf2::Vector3 obs = local_planner_.getNearestObs();
 	local_path.pose.position.x = cur_pose.pose.position.x + local_plan.getX();
 	local_path.pose.position.y = cur_pose.pose.position.y + local_plan.getY();
 	local_path.pose.position.z = cur_pose.pose.position.z + local_plan.getZ();
 	lp_controller_.setLocalPath(local_path);
+
+	if(isOnMission_){
+		if(!moving_dist_.empty())
+			moving_dist_.push_back(cur_pose - pre_pose_ + moving_dist_.back());
+		else
+			moving_dist_.push_back(cur_pose - pre_pose_);
+		if(target - cur_pose < 0.2){
+			isOnMission_ = false;
+			mission_end_ = ros::Time::now();
+			ROS_INFO_STREAM("UAV" << vehicle_info_.vehicle_id_ << " arrived at target position");
+		}
+	}
+	pre_pose_ = cur_pose;
 	
+	if(obs.length() < 2 and !isInCollision_){
+		isInCollision_ = true;
+		collision_start_ = ros::Time::now();
+	}
+	if(obs.length() > 2 and isInCollision_){
+		collsions_.push_back(ros::Time::now() - collision_start_);
+		isInCollision_ = false;
+	}
+
 	if(isPublish()){
 		if (use_velocity_controller)
 			lp_controller_.goToVel();
 		else
 			lp_controller_.goTo();
 	}
+}
+
+std::string Vehicle::printMovingDist(){
+	std::ostringstream oss;
+	oss << "Moving dist : ";
+	for(auto &dist : moving_dist_){
+		oss << dist << " ";
+	}
+	oss << std::endl;
+	moving_dist_.clear();
+	
+	oss << "Collision durations : ";
+	for(auto &collision : collsions_){
+		oss << collision << " ";
+	}
+	oss << std::endl;
+	collsions_.clear();
+	
+	return oss.str();
 }
 
 double SwarmVehicle::sensing_range_;
@@ -604,6 +677,7 @@ void SwarmVehicle::swarmServiceInit()
 	multi_setpoint_local_server_ = nh_.advertiseService("multi_setpoint_local", &SwarmVehicle::multiSetpointLocal, this);
 	multi_setpoint_global_server_ = nh_.advertiseService("multi_setpoint_global", &SwarmVehicle::multiSetpointGlobal, this);
 	goto_vehicle_server_ = nh_.advertiseService("goto_vehicle", &SwarmVehicle::gotoVehicle, this);
+	print_summary_server_ = nh_.advertiseService("print_summary", &SwarmVehicle::printSummary, this);
 }
 
 void SwarmVehicle::release()
@@ -684,9 +758,9 @@ void SwarmVehicle::calRepulsive(Vehicle &vehicle)
 			}
 		}
 	}
-	// sum_vel = calFv(sum, sum_vel);
+	sum_vel = calFv(sum, sum_vel);
 	vehicle.setRepulsive(sum);
-	// vehicle.setRepulsiveVel(sum_vel);
+	vehicle.setRepulsiveVel(sum_vel);
 	vehicle.setNearestObs(nearest_obs);
 }
 
@@ -1610,6 +1684,24 @@ bool SwarmVehicle::gotoVehicle(swarm_ctrl_pkg::srvGoToVehicle::Request &req,
 	return res.success;
 }
 
+bool SwarmVehicle::printSummary(std_srvs::Trigger::Request &req,
+							   std_srvs::Trigger::Response &res)
+{
+	std::ostringstream oss;
+	std::ofstream outfile("apf.txt", std::ios::app);
+	res.success = true;
+	for (auto &vehicle : camila_)
+	{
+		oss << vehicle.getInfo().vehicle_id_ << " ";
+		oss << "Mission Duration: " << vehicle.getMissionDuration() << std::endl;
+		oss << vehicle.printMovingDist() << std::endl;
+	}
+	outfile << oss.str();
+	outfile.close();
+
+	return res.success;
+}
+
 tf2::Vector3 SwarmVehicle::convertGeoToENU(const sensor_msgs::NavSatFix &coord,
 										   const sensor_msgs::NavSatFix &home)
 {
@@ -1750,7 +1842,8 @@ void SwarmVehicle::run()
 		calAttractive(vehicle);
 		if (use_repulsive_force){
 			if(use_adaptive)
-				vehicle.setLocalPlanner(AdaptivePotentialField::getInstance());
+				// vehicle.setLocalPlanner(AdaptivePotentialField::getInstance());
+				vehicle.setLocalPlanner(CTCA::getInstance());
 			else
 				vehicle.setLocalPlanner(PotentialField::getInstance());
 			
@@ -1762,4 +1855,5 @@ void SwarmVehicle::run()
 		vehicle.goTo();
 	}
 	formationGenerator();
+
 }

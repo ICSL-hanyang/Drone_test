@@ -1,0 +1,8 @@
+rosservice call /goto_vehicle -- 1 9 -5 5
+rosservice call /goto_vehicle -- 2 3 -5 5
+rosservice call /goto_vehicle -- 3 -3 -5 5
+rosservice call /goto_vehicle -- 4 -9 -5 5
+rosservice call /goto_vehicle -- 5 9 5 5
+rosservice call /goto_vehicle -- 6 3 5 5
+rosservice call /goto_vehicle -- 7 -3 5 5
+rosservice call /goto_vehicle -- 8 -9 5 5
