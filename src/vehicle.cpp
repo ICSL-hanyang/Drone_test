@@ -244,6 +244,15 @@ void LocalPoseController::goToVel(){
 	setpoint_vel_pub_.publish(vel);
 }
 
+void LocalPoseController::goToVel(tf2::Vector3 &vel){
+	geometry_msgs::Twist setpoint;
+	setpoint.linear.x = vel.getX();
+	setpoint.linear.y = vel.getY();
+	setpoint.linear.z = vel.getZ();
+
+	setpoint_vel_pub_.publish(setpoint);
+}
+
 void LocalPoseController::setTarget(const geometry_msgs::PoseStamped &target){
 	setpoint_publish_flag_ = true;
 
@@ -267,7 +276,8 @@ Vehicle::Vehicle(ros::NodeHandle &nh_mul, ros::NodeHandle &nh_global)
 	  isOnMission_(false),
 	  isInCollision_(false),
 	  gp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_),
-	  lp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_)
+	  lp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_),
+	  dwa_controller_(nh_, nh_global, vehicle_info_.vehicle_name_)
 {
 	vehicleInit();
 }
@@ -281,7 +291,8 @@ Vehicle::Vehicle(ros::NodeHandle &nh_mul, ros::NodeHandle &nh_global, const Vehi
 	  isOnMission_(false),
 	  isInCollision_(false),
 	  gp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_),
-	  lp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_)
+	  lp_controller_(nh_, nh_global, vehicle_info_.vehicle_name_),
+	  dwa_controller_(nh_, nh_global, vehicle_info_.vehicle_name_)
 {
 	vehicleInit();
 }
@@ -295,7 +306,8 @@ Vehicle::Vehicle(const Vehicle &rhs)
 	  isOnMission_(false),
 	  isInCollision_(false),
 	  gp_controller_(nh_, rhs.nh_global_, vehicle_info_.vehicle_name_),
-	  lp_controller_(nh_, rhs.nh_global_, vehicle_info_.vehicle_name_)
+	  lp_controller_(nh_, rhs.nh_global_, vehicle_info_.vehicle_name_),
+	  dwa_controller_(nh_, rhs.nh_global_, vehicle_info_.vehicle_name_)
 {
 	vehicleInit();
 	*this = rhs;
@@ -541,6 +553,13 @@ void Vehicle::goTo(){
 	local_path.pose.position.z = cur_pose.pose.position.z + local_plan.getZ();
 	lp_controller_.setLocalPath(local_path);
 
+	//for DWA 
+	tf2::Vector3 init_pose(cur_pose.pose.position.x, cur_pose.pose.position.y, cur_pose.pose.position.z);
+	tf2::Vector3 goal(target.pose.position.x, target.pose.position.y, target.pose.position.z);
+	std::vector<tf2::Vector3> obstacle;
+	obstacle.push_back(obs);
+	tf2::Vector3 local_plan_dwa = dwa_controller_.evalTrajectory(init_pose, goal, obstacle);
+
 	if(isOnMission_){
 		if(!moving_dist_.empty())
 			moving_dist_.push_back(cur_pose - pre_pose_ + moving_dist_.back());
@@ -567,7 +586,8 @@ void Vehicle::goTo(){
 		if (use_velocity_controller)
 			lp_controller_.goToVel();
 		else
-			lp_controller_.goTo();
+			lp_controller_.goToVel(local_plan_dwa);
+			// lp_controller_.goTo();
 	}
 }
 
@@ -728,6 +748,7 @@ void SwarmVehicle::setVehicleGlobalPose()
 void SwarmVehicle::calRepulsive(Vehicle &vehicle)
 {
 	tf2::Vector3 sum(0, 0, 0), sum_vel(0, 0, 0), nearest_obs(1000, 1000, 1000);
+	std::vector<tf2::Vector3> obstacles;
 
 	for (auto &another_vehicle : camila_)
 	{
@@ -735,29 +756,42 @@ void SwarmVehicle::calRepulsive(Vehicle &vehicle)
 		{
 			tf2::Vector3 diff_pose = vehicle.getGlobalPose() - another_vehicle.getGlobalPose();
 			tf2::Vector3 diff_vel = another_vehicle.getVel() - vehicle.getVel();
-			
-			double dist_pose = diff_pose.length();
-			double dist_vel = diff_vel.length();
-			double safety_range;
-			tf2::Vector3 diff_pose_unit = diff_pose.normalized();
-			tf2::Vector3 fp(0, 0, 0);
-			nh_global_.getParamCached("local_plan/safety_range", safety_range);
-			if (dist_pose < sensing_range_)
+			std::vector<tf2::Vector3> diff_poses;
+			double vehicle_z = vehicle.getGlobalPose().getZ();
+			tf2::Vector3 vehicle_pose = vehicle.getGlobalPose();
+			diff_poses.push_back(diff_pose);
+			diff_poses.push_back(vehicle_pose - tf2::Vector3(1, 0, vehicle_z));
+			diff_poses.push_back(vehicle_pose - tf2::Vector3(4, 0, vehicle_z));
+			diff_poses.push_back(vehicle_pose - tf2::Vector3(-1, 0, vehicle_z));
+			diff_poses.push_back(vehicle_pose - tf2::Vector3(-4, 0, vehicle_z));
+
+			for ( auto &diff_pose : diff_poses)
 			{
-				fp = diff_pose_unit * ((sensing_range_*sensing_range_) / (dist_pose*dist_pose));
-				// fp = diff_pose_unit * ((sensing_range_*sensing_range_) / (dist_pose*dist_pose - safety_range*safety_range));
-				// fp = diff_pose_unit * exp(sensing_range_/dist_pose);
-				// fp = diff_pose_unit * (sensing_range_ /(exp(dist_pose - safety_range)));
-				diff_vel *= dist_vel;
-				// diff_vel *= exp(dist_vel/2)/dist_vel;
-				sum += fp;
-				sum_vel += diff_vel;
-				if (dist_pose < nearest_obs.length()){
-					nearest_obs = -diff_pose;
+				double dist_pose = diff_pose.length();
+				double dist_vel = diff_vel.length();
+				double safety_range;
+				tf2::Vector3 diff_pose_unit = diff_pose.normalized();
+				tf2::Vector3 fp(0, 0, 0);
+				nh_global_.getParamCached("local_plan/safety_range", safety_range);
+				if (dist_pose < sensing_range_)
+				{
+					fp = diff_pose_unit * ((sensing_range_*sensing_range_) / (dist_pose*dist_pose));
+					// fp = diff_pose_unit * ((sensing_range_*sensing_range_) / (dist_pose*dist_pose - safety_range*safety_range));
+					// fp = diff_pose_unit * exp(sensing_range_/dist_pose);
+					// fp = diff_pose_unit * (sensing_range_ /(exp(dist_pose - safety_range)));
+					diff_vel *= dist_vel;
+					// diff_vel *= exp(dist_vel/2)/dist_vel;
+					sum += fp;
+					sum_vel += diff_vel;
+					if (dist_pose < nearest_obs.length()){
+						nearest_obs = -diff_pose;
+					}
+					obstacles.push_back(-diff_pose);
 				}
 			}
 		}
 	}
+	vehicle.setObstacles(obstacles);
 	sum_vel = calFv(sum, sum_vel);
 	vehicle.setRepulsive(sum);
 	vehicle.setRepulsiveVel(sum_vel);
@@ -1847,11 +1881,11 @@ void SwarmVehicle::run()
 			else
 				vehicle.setLocalPlanner(PotentialField::getInstance());
 			
-			calRepulsive(vehicle);
 		}
 		else
 			vehicle.setLocalPlanner(AttractiveOnly::getInstance());
 
+		calRepulsive(vehicle);
 		vehicle.goTo();
 	}
 	formationGenerator();

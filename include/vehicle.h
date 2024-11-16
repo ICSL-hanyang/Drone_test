@@ -34,6 +34,7 @@
 #include <swarm_ctrl_pkg/srvGoToVehicle.h>
 #include <swarm_ctrl_pkg/srvMultiSetpointLocal.h>
 #include <swarm_ctrl_pkg/srvMultiSetpointGlobal.h>
+#include <dwa.h>
 
 #define CONSTANTS_RADIUS_OF_EARTH 6371000 /* meters (m)		*/
 #define M_DEG_TO_RAD (M_PI / 180.0)
@@ -217,6 +218,8 @@ public:
 
 class LocalPoseController : public PoseController<geometry_msgs::PoseStamped>
 {
+private:
+	std::vector<tf2::Vector3> obstacles_;
 public:
 	LocalPoseController(ros::NodeHandle &, ros::NodeHandle &, std::string &);
 	~LocalPoseController();
@@ -224,7 +227,10 @@ public:
 	void velCB(const geometry_msgs::TwistStamped::ConstPtr &msg);
 	virtual void goTo();
 	virtual void goToVel();
+	void goToVel(tf2::Vector3 &);
 	virtual void setTarget(const geometry_msgs::PoseStamped &);
+	void setObstacles(const std::vector<tf2::Vector3> &obstacles){obstacles_ = obstacles;};
+	std::vector<tf2::Vector3> getObstacles(){return obstacles_;};
 };
 
 class Vehicle
@@ -293,6 +299,7 @@ class Vehicle
 	LocalPlanner local_planner_;
 	GeoPoseController gp_controller_;
 	LocalPoseController lp_controller_;
+	DWA dwa_controller_;
 
   public:
 	Vehicle() = delete;
@@ -364,6 +371,7 @@ class Vehicle
 		r_vel_pub_.publish(msg);
 	};
 	void setNearestObs(const tf2::Vector3 &nearest_obs){local_planner_.setNearestObs(nearest_obs);};
+	void setObstacles(const std::vector<tf2::Vector3> &obstacles){lp_controller_.setObstacles(obstacles);};
 	ros::Duration getMissionDuration(){return mission_end_ - mission_start_;};
 	std::string printMovingDist();
 
